@@ -61,7 +61,8 @@ def prepare_paddleocr_data(csv_path, img_dir, output_dir, train_ratio=0.9):
         else:
             print(f"Warning: Image {src_img_path} not found, skipping.")
 
-    # 4. 数据集随机打乱并划分
+    # 4. 数据集随机打乱并划分 (使用固定种子确保可重复运行结果一模一样)
+    random.seed(42)
     random.shuffle(results)
     split_idx = int(len(results) * train_ratio)
     train_list = results[:split_idx]
@@ -89,27 +90,24 @@ def prepare_paddleocr_data(csv_path, img_dir, output_dir, train_ratio=0.9):
     print(f"Output directory: {train_data_dir}")
 
 if __name__ == "__main__":
-    # AI Studio/云端环境路径配置
-    # 假设代码在 /home/aistudio/wenzishibie，数据集挂载在 /home/aistudio/data
-    AI_STUDIO_BASE = "/home/aistudio"
-    
-    # 1. 定义压缩包路径和解压目标路径
-    TRAIN_ZIP = os.path.join(AI_STUDIO_BASE, "data/data62842/train_images.zip")
-    TRAIN_EXTRACT_DIR = os.path.join(AI_STUDIO_BASE, "data/data62842/") # 解压到数据集目录下
-    
-    # 2. 执行解压 (如果图片目录不存在则解压)
-    IMAGE_DIR = os.path.join(TRAIN_EXTRACT_DIR, "train_images")
-    if not os.path.exists(IMAGE_DIR):
-        unzip_data(TRAIN_ZIP, TRAIN_EXTRACT_DIR)
-    else:
-        print(f"Images already extracted at {IMAGE_DIR}")
-
-    # 3. 设置 CSV 路径
-    CSV_FILE = os.path.join(AI_STUDIO_BASE, "data/data62842/train_label.csv")
-    
-    # 4. 设置输出目录（代码所在目录）
+    # 本地环境路径配置
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-    OUTPUT_ROOT = CURRENT_DIR
     
-    # 5. 运行数据准备逻辑
-    prepare_paddleocr_data(CSV_FILE, IMAGE_DIR, OUTPUT_ROOT)
+    # 1. 定义解压后存放数据的目录 (由 extract_data.py 生成)
+    # 假设解压后 data/ 目录就在当前目录下
+    DATA_ROOT = os.path.join(CURRENT_DIR, "data")
+    IMAGE_DIR = os.path.join(DATA_ROOT, "train_images")
+    CSV_FILE = os.path.join(DATA_ROOT, "train_label.csv")
+    
+    # 2. 检查数据是否存在
+    if not os.path.exists(IMAGE_DIR) or not os.path.exists(CSV_FILE):
+        print(f"错误: 找不到数据目录或标签文件。")
+        print(f"请先运行 'python extract_data.py' 来恢复 data/ 文件夹。")
+    else:
+        # 3. 设置输出目录（训练数据将生成在当前目录下的 train_data 文件夹内）
+        OUTPUT_ROOT = CURRENT_DIR
+        
+        # 4. 运行数据准备逻辑
+        print("开始准备训练数据...")
+        prepare_paddleocr_data(CSV_FILE, IMAGE_DIR, OUTPUT_ROOT)
+        print("数据准备完成！")

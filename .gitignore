@@ -6,7 +6,7 @@ venv/
 
 # 排除原始庞大数据集目录（已压缩为分卷）
 data/
-train_data/
+train_data*/
 
 # 巨大的模型权重
 checkpoints*/
