@@ -12,6 +12,10 @@ train_data/
 checkpoints*/
 *.pdparams
 
+# 允许上传分卷压缩包
+!data_archive.zip
+!data_archive.z*
+
 # 系统与实验结果
 .DS_Store
 .vscode/
