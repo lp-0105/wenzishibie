@@ -16,8 +16,10 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- 1. 参数配置 ---
 IMG_H, IMG_W = 48, 160
-BATCH_SIZE = 256  # V100 16GB 显存充足，从 160 提升到 256，显著加快单次 Epoch 速度
-EPOCHS = 350      # 既然用了更好的卡，增加 Epoch 深度，让模型充分利用语义增强学习
+# T4 GPU 有 16GB 显存，对于这个模型，256-512 都是安全的。
+# 使用较大的 Batch Size 可以更好地利用 GPU 并加速收敛。
+BATCH_SIZE = 512  
+EPOCHS = 350      
 DEVICE = 'gpu' if paddle.is_compiled_with_cuda() else 'cpu'
 
 def get_gpu_info():
@@ -90,12 +92,28 @@ def decode_ctc(preds_idx):
     return res
 
 def train():
+    # 自动获取当前脚本所在目录，确保在 Colab/本地 运行路径一致
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    TRAIN_DATA_ROOT = os.path.join(BASE_DIR, 'train_data')
+    TRAIN_TXT = os.path.join(TRAIN_DATA_ROOT, 'train.txt')
+    VAL_TXT = os.path.join(TRAIN_DATA_ROOT, 'val.txt')
+
     paddle.set_device(DEVICE)
-    train_ds = CustomOCRDataset('train_data/train.txt', 'train_data', mode='train')
-    val_ds = CustomOCRDataset('train_data/val.txt', 'train_data', mode='none')
-    # 针对 AI Studio 2核 CPU 环境：将 num_workers 设为 0（主进程读取），避免多进程切换导致的 GPU 饥饿
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0)
+    
+    # 检查训练数据是否存在
+    if not os.path.exists(TRAIN_TXT):
+        print(f"错误: 找不到训练数据 {TRAIN_TXT}")
+        print("请确保已运行 python extract_data.py 和 python prepare_data.py")
+        return
+
+    train_ds = CustomOCRDataset(TRAIN_TXT, TRAIN_DATA_ROOT, mode='train')
+    val_ds = CustomOCRDataset(VAL_TXT, TRAIN_DATA_ROOT, mode='none')
+    
+    # Colab 环境 CPU 性能通常较好，可以尝试将 num_workers 设为 2 或更大
+    num_workers = 0 if DEVICE == 'cpu' else 2 
+    
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=num_workers)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
     
     model = TransformerOCR(num_classes)
     
@@ -115,6 +133,10 @@ def train():
     start_time = time.time()
     best_val_acc = 0.0
     
+    # T4 具有 Tensor Cores，开启自动混合精度训练 (AMP) 可以获得 2-3 倍的加速
+    # 注意：level='O1' 通常比 'O2' 更稳定且兼容性更好
+    scaler = paddle.amp.GradScaler(init_loss_scaling=1024)
+    
     for epoch in range(EPOCHS):
         model.train()
         for i, (imgs, labels, l_lens) in enumerate(train_loader()):
@@ -122,22 +144,29 @@ def train():
             labels = paddle.to_tensor(labels)
             l_lens = paddle.to_tensor(l_lens)
             
-            # --- 投影前向传播 ---
-            # 训练时传入 labels 作为 targets，实现语义辅助学习
-            ctc_out, att_out = model(imgs, targets=labels)
+            # 使用混合精度训练加速
+            with paddle.amp.auto_cast(level='O1'):
+                # --- 投影前向传播 ---
+                # 训练时传入 labels 作为 targets，实现语义辅助学习
+                ctc_out, att_out = model(imgs, targets=labels)
+                
+                # 1. CTC Loss (视觉头)
+                ctc_loss = ctc_loss_fn(ctc_out.transpose([1, 0, 2]), labels, paddle.to_tensor([40]*len(imgs), dtype='int64'), l_lens)
+                
+                # 2. Attention Loss (语义头 - 标签平滑)
+                # targets 右移一位并添加 SOS/Padding 这里的 labels 是已经 padding 过的
+                att_loss = att_loss_fn(att_out.reshape([-1, num_classes]), labels.reshape([-1]))
+                
+                # --- 联合训练：视觉为主 (1.0)，语义为辅 (0.1) ---
+                loss = ctc_loss + 0.1 * att_loss
             
-            # 1. CTC Loss (视觉头)
-            ctc_loss = ctc_loss_fn(ctc_out.transpose([1, 0, 2]), labels, paddle.to_tensor([40]*len(imgs), dtype='int64'), l_lens)
+            # 使用 GradScaler 反向传播并更新梯度
+            scaled_loss = scaler.scale(loss)
+            scaled_loss.backward()
+            scaler.step(opt)
+            scaler.update()
             
-            # 2. Attention Loss (语义头 - 标签平滑)
-            # targets 右移一位并添加 SOS/Padding 这里的 labels 是已经 padding 过的
-            att_loss = att_loss_fn(att_out.reshape([-1, num_classes]), labels.reshape([-1]))
-            
-            # --- 联合训练：视觉为主 (1.0)，语义为辅 (0.1) ---
-            loss = ctc_loss + 0.1 * att_loss
-            
-            loss.backward()
-            opt.step()
+            # 步进学习率并清除梯度
             lr_scheduler.step()
             opt.clear_grad()
             
