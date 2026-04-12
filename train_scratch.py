@@ -16,9 +16,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- 1. 参数配置 ---
 IMG_H, IMG_W = 48, 160
-# T4 GPU 有 16GB 显存，对于这个模型，256-512 都是安全的。
-# 使用较大的 Batch Size 可以更好地利用 GPU 并加速收敛。
-BATCH_SIZE = 512  
+# T4 GPU 16GB 显存，由于引入了语义增强头，计算开销增加。
+# 调整为 150 以平衡显存占用与训练速度。
+BATCH_SIZE = 150  
 EPOCHS = 350      
 DEVICE = 'gpu' if paddle.is_compiled_with_cuda() else 'cpu'
 
