@@ -16,8 +16,8 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- 1. 参数配置 ---
 IMG_H, IMG_W = 48, 160
-BATCH_SIZE = 160  # 调整为 160，保留约 1GB 显存头衔空间，防止假死
-EPOCHS = 300      
+BATCH_SIZE = 256  # V100 16GB 显存充足，从 160 提升到 256，显著加快单次 Epoch 速度
+EPOCHS = 350      # 既然用了更好的卡，增加 Epoch 深度，让模型充分利用语义增强学习
 DEVICE = 'gpu' if paddle.is_compiled_with_cuda() else 'cpu'
 
 def get_gpu_info():
@@ -93,8 +93,9 @@ def train():
     paddle.set_device(DEVICE)
     train_ds = CustomOCRDataset('train_data/train.txt', 'train_data', mode='train')
     val_ds = CustomOCRDataset('train_data/val.txt', 'train_data', mode='none')
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=4)
+    # V100 CPU 核心也较多，并行读取 num_workers 从 4 提升到 8，防止数据读取成为瓶颈
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=8)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=8)
     
     model = TransformerOCR(num_classes)
     
