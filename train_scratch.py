@@ -93,9 +93,9 @@ def train():
     paddle.set_device(DEVICE)
     train_ds = CustomOCRDataset('train_data/train.txt', 'train_data', mode='train')
     val_ds = CustomOCRDataset('train_data/val.txt', 'train_data', mode='none')
-    # 适配 AI Studio V100 2核 CPU 环境，将 num_workers 调回 4 避免进程切换开销
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=4)
+    # 针对 AI Studio 2核 CPU 环境：将 num_workers 设为 0（主进程读取），避免多进程切换导致的 GPU 饥饿
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=0)
     
     model = TransformerOCR(num_classes)
     
