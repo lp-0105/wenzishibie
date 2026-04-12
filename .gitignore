@@ -1,0 +1,25 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# 庞大的数据集 (建议在云端单独挂载)
+data/
+train_data/train_images/
+train_data/val_images/
+test_images/
+
+# 巨大的模型权重 (建议只保留最新最佳的一两个)
+checkpoints*/
+*.pdparams
+
+# 系统文件
+.DS_Store
+.vscode/
+
+# 实验结果
+result.txt
+submission.csv
+submission.txt
