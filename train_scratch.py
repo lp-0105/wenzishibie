@@ -16,9 +16,9 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- 1. 参数配置 ---
 IMG_H, IMG_W = 48, 160
-# T4 GPU 16GB 显存，由于引入了语义增强头，计算开销增加。
-# 调整为 150 以平衡显存占用与训练速度。
-BATCH_SIZE = 150  
+# T4 GPU 16GB 显存，根据实时日志，150 时显存约占用 7.3GB（48%）。
+# 提升至 256 可以显著加快训练速度并利用更多显存。
+BATCH_SIZE = 256  
 EPOCHS = 350      
 DEVICE = 'gpu' if paddle.is_compiled_with_cuda() else 'cpu'
 
@@ -109,8 +109,8 @@ def train():
     train_ds = CustomOCRDataset(TRAIN_TXT, TRAIN_DATA_ROOT, mode='train')
     val_ds = CustomOCRDataset(VAL_TXT, TRAIN_DATA_ROOT, mode='none')
     
-    # Colab 环境 CPU 性能通常较好，可以尝试将 num_workers 设为 2 或更大
-    num_workers = 0 if DEVICE == 'cpu' else 2 
+    # Colab 环境为 2 核 CPU，设置 num_workers=4 可以确保数据读取不成为 GPU 计算的瓶颈
+    num_workers = 4 if DEVICE == 'gpu' else 0 
     
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=num_workers)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
