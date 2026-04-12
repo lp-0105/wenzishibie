@@ -1,7 +1,23 @@
 import os
 import pandas as pd
 import random
+import zipfile
 from shutil import copy2, move
+
+def unzip_data(zip_path, target_dir):
+    """
+    解压数据集文件
+    """
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir, exist_ok=True)
+    
+    if os.path.exists(zip_path):
+        print(f"Extracting {zip_path} to {target_dir}...")
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(target_dir)
+        print("Extraction completed.")
+    else:
+        print(f"Warning: Zip file {zip_path} not found.")
 
 def prepare_paddleocr_data(csv_path, img_dir, output_dir, train_ratio=0.9):
     # 1. 创建目标目录
@@ -73,12 +89,27 @@ def prepare_paddleocr_data(csv_path, img_dir, output_dir, train_ratio=0.9):
     print(f"Output directory: {train_data_dir}")
 
 if __name__ == "__main__":
-    # 根据你的项目路径设置
-    BASE_DIR = "/home/lvpu/wenzishibie/data"
-    CSV_FILE = os.path.join(BASE_DIR, "train_label.csv")
-    IMAGE_DIR = os.path.join(BASE_DIR, "train_images")
+    # AI Studio/云端环境路径配置
+    # 假设代码在 /home/aistudio/wenzishibie，数据集挂载在 /home/aistudio/data
+    AI_STUDIO_BASE = "/home/aistudio"
     
-    # 假设你希望把 PaddleOCR 文件夹放在 wenzishibie 根下
-    OUTPUT_ROOT = "/home/lvpu/wenzishibie"
+    # 1. 定义压缩包路径和解压目标路径
+    TRAIN_ZIP = os.path.join(AI_STUDIO_BASE, "data/data62842/train_images.zip")
+    TRAIN_EXTRACT_DIR = os.path.join(AI_STUDIO_BASE, "data/data62842/") # 解压到数据集目录下
     
+    # 2. 执行解压 (如果图片目录不存在则解压)
+    IMAGE_DIR = os.path.join(TRAIN_EXTRACT_DIR, "train_images")
+    if not os.path.exists(IMAGE_DIR):
+        unzip_data(TRAIN_ZIP, TRAIN_EXTRACT_DIR)
+    else:
+        print(f"Images already extracted at {IMAGE_DIR}")
+
+    # 3. 设置 CSV 路径
+    CSV_FILE = os.path.join(AI_STUDIO_BASE, "data/data62842/train_label.csv")
+    
+    # 4. 设置输出目录（代码所在目录）
+    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+    OUTPUT_ROOT = CURRENT_DIR
+    
+    # 5. 运行数据准备逻辑
     prepare_paddleocr_data(CSV_FILE, IMAGE_DIR, OUTPUT_ROOT)
