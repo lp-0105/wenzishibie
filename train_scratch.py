@@ -14,12 +14,11 @@ from model import TransformerOCR
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- 1. 参数配置 ---
-IMG_H, IMG_W = 48, 160
-# T4 GPU 16GB 显存，根据实时日志，150 时显存约占用 7.3GB（48%）。
-# 提升至 256 可以显著加快训练速度并利用更多显存。
-BATCH_SIZE = 256  
-EPOCHS = 350      
+# --- 1. 参数配置 (RTX 4090 狂暴模式: TPS + 极速收敛) ---
+IMG_H, IMG_W = 32, 320 
+# 4090 拥有 24GB 显存，建议 BS 设为 512，大幅缩短训练耗时
+BATCH_SIZE = 512  
+EPOCHS = 400      
 DEVICE = 'gpu' if paddle.is_compiled_with_cuda() else 'cpu'
 
 def get_gpu_info():
@@ -35,15 +34,34 @@ class OCRTransforms:
         self.mode = mode
     def __call__(self, img):
         if self.mode == 'train':
+            # 1. 基础旋转 (稍微加大到 -7 to 7 度)
             if random.random() > 0.5:
-                angle = random.uniform(-5, 5)
+                angle = random.uniform(-7, 7)
                 img = img.rotate(angle, resample=Image.BILINEAR, fillcolor=255)
+            
+            # 2. 空间扰动 (轻微透视/扭曲，强制 TPS 学习纠偏)
+            if random.random() > 0.7:
+                w, h = img.size
+                x1, y1 = random.uniform(0, 0.05) * w, random.uniform(0, 0.05) * h
+                x2, y2 = w - random.uniform(0, 0.05) * w, random.uniform(0, 0.05) * h
+                x3, y3 = w - random.uniform(0, 0.05) * w, h - random.uniform(0, 0.05) * h
+                x4, y4 = random.uniform(0, 0.05) * w, h - random.uniform(0, 0.05) * h
+                img = img.transform((w, h), Image.QUAD, (x1, y1, x4, y4, x3, y3, x2, y2), fillcolor=255)
+
+            # 3. 随机噪点 (模拟脏背景/漏墨，浓度设低 0.02)
             if random.random() > 0.8:
-                img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.1, 0.8)))
+                img_array = np.array(img)
+                mask = np.random.uniform(0, 1, img_array.shape) < 0.01 # 1% 的像素变黑/点
+                img_array[mask] = 0
+                img = Image.fromarray(img_array)
+
+            # 4. 模糊与对比度 (保持原有逻辑)
+            if random.random() > 0.8:
+                img = img.filter(ImageFilter.GaussianBlur(radius=random.uniform(0.1, 0.5)))
             from PIL import ImageEnhance
             if random.random() > 0.7:
                 enhancer = ImageEnhance.Contrast(img)
-                img = enhancer.enhance(random.uniform(0.7, 1.3))
+                img = enhancer.enhance(random.uniform(0.8, 1.2))
         return img
 
 with open('ppocr_keys_v1.txt', 'r', encoding='utf-8') as f:
@@ -109,73 +127,90 @@ def train():
     train_ds = CustomOCRDataset(TRAIN_TXT, TRAIN_DATA_ROOT, mode='train')
     val_ds = CustomOCRDataset(VAL_TXT, TRAIN_DATA_ROOT, mode='none')
     
-    # Colab 环境为 2 核 CPU，设置 num_workers=4 可以确保数据读取不成为 GPU 计算的瓶颈
-    num_workers = 4 if DEVICE == 'gpu' else 0 
+    # 4090 并行吞吐极强，数据加载如果不满，GPU 会“挨饿”
+    num_workers = 8 if DEVICE == 'gpu' else 0 
     
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=num_workers)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
     
     model = TransformerOCR(num_classes)
     
+    # --- 核心改进：重置训练状态 (TPS 架构变更，不能直接 Load 之前的模型) ---
+    RESUME_PATH = 'checkpoints/best_model_tps.pdparams' # 换个新文件名存储
+    if os.path.exists(RESUME_PATH):
+        print(f"检测到 TPS 专用断点，正在加载之前训好的模型: {RESUME_PATH}")
+        model.set_state_dict(paddle.load(RESUME_PATH))
+    else:
+        print("新的 TPS 架构，将从 Epoch 0 开始全新磨合！")
+
     # --- 核心改进 A: 标签平滑 (Label Smoothing) ---
     # 辅助的 Attention 损失函数使用标签平滑，防止过拟合
     att_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
     ctc_loss_fn = nn.CTCLoss(blank=0) 
 
-    base_lr = 0.0003 
+    base_lr = 0.001 # 4090 并行大 BS 可以使用更大的 LR (0.001) 起步
     steps_per_epoch = len(train_loader)
     lr_scheduler = paddle.optimizer.lr.CosineAnnealingDecay(learning_rate=base_lr, T_max=EPOCHS * steps_per_epoch)
     lr_scheduler = paddle.optimizer.lr.LinearWarmup(learning_rate=lr_scheduler, warmup_steps=20 * steps_per_epoch, start_lr=0, end_lr=base_lr)
     
-    opt = paddle.optimizer.AdamW(learning_rate=lr_scheduler, parameters=model.parameters(), weight_decay=0.05, grad_clip=nn.ClipGradByNorm(10.0))
+    opt = paddle.optimizer.AdamW(learning_rate=lr_scheduler, parameters=model.parameters(), weight_decay=0.01, grad_clip=nn.ClipGradByNorm(5.0))
     
-    print(f"开始语义增强训练! 设备: {DEVICE}, BS: {BATCH_SIZE}")
+    print(f"开始 TPS+双头 全速训练! 设备: {DEVICE}, BS: {BATCH_SIZE}")
     start_time = time.time()
     best_val_acc = 0.0
     
-    # T4 具有 Tensor Cores，开启自动混合精度训练 (AMP) 可以获得 2-3 倍的加速
-    # 注意：level='O1' 通常比 'O2' 更稳定且兼容性更好
-    scaler = paddle.amp.GradScaler(init_loss_scaling=1024)
+    # --- 重置 Epoch 计数器 ---
+    START_EPOCH = 0 
     
-    for epoch in range(EPOCHS):
+    # --- 强进阶：分段训练 (Multi-stage Training) ---
+    # 前 320 轮开启大强度数据增强进行“苦练”
+    # 后 80 轮关闭或极端弱化数据增强进行“冲刺” (以求损失函数在干净数据上坍塌到极低)
+    
+    for epoch in range(START_EPOCH, EPOCHS):
         model.train()
+        # 320 轮之后进入“冲刺期”，关闭复杂的旋转和透视，专注拟合
+        if epoch >= 320:
+            train_ds.mode = 'none' 
+        else:
+            train_ds.mode = 'train'
+
         for i, (imgs, labels, l_lens) in enumerate(train_loader()):
             imgs = paddle.to_tensor(imgs)
             labels = paddle.to_tensor(labels)
             l_lens = paddle.to_tensor(l_lens)
             
-            # 使用混合精度训练加速
-            with paddle.amp.auto_cast(level='O1'):
-                # --- 投影前向传播 ---
-                # 训练时传入 labels 作为 targets，实现语义辅助学习
-                ctc_out, att_out = model(imgs, targets=labels)
-                
-                # 1. CTC Loss (视觉头)
-                ctc_loss = ctc_loss_fn(ctc_out.transpose([1, 0, 2]), labels, paddle.to_tensor([40]*len(imgs), dtype='int64'), l_lens)
-                
-                # 2. Attention Loss (语义头 - 标签平滑)
-                # targets 右移一位并添加 SOS/Padding 这里的 labels 是已经 padding 过的
-                att_loss = att_loss_fn(att_out.reshape([-1, num_classes]), labels.reshape([-1]))
-                
-                # --- 联合训练：视觉为主 (1.0)，语义为辅 (0.1) ---
-                loss = ctc_loss + 0.1 * att_loss
+            # --- 投影前向传播 ---
+            # 训练时传入 labels 作为 targets，实现语义辅助学习
+            ctc_out, att_out = model(imgs, targets=labels)
             
-            # 使用 GradScaler 反向传播并更新梯度
-            scaled_loss = scaler.scale(loss)
-            scaled_loss.backward()
-            scaler.step(opt)
-            scaler.update()
+            # 1. CTC Loss (视觉头)
+            ctc_loss = ctc_loss_fn(ctc_out.transpose([1, 0, 2]), labels, paddle.to_tensor([40]*len(imgs), dtype='int64'), l_lens)
+            
+            # 2. Attention Loss (语义头 - 标签平滑)
+            att_loss = att_loss_fn(att_out.reshape([-1, num_classes]), labels.reshape([-1]))
+            
+            # --- 联合训练：视觉为主 (1.0)，语义为辅 (0.1) ---
+            loss = ctc_loss + 0.1 * att_loss
+            
+            # 使用标准的 FP32 反向传播，更稳定
+            loss.backward()
+            opt.step()
             
             # 步进学习率并清除梯度
             lr_scheduler.step()
             opt.clear_grad()
+
+            # 宿舍无人昼间模式：移除所有休眠，全力冲刺
+            # time.sleep(0.04)
             
             if i % 100 == 0:
-                # 重新计算 ETA 并在日志中显示当前学习率 LR
-                processed_steps = epoch * steps_per_epoch + i + 1
-                total_steps = EPOCHS * steps_per_epoch
-                avg_time_per_step = (time.time() - start_time) / processed_steps
-                eta_seconds = avg_time_per_step * (total_steps - processed_steps)
+                # 修正加速模式下的 ETA 计算：只计算从本次启动（Epoch 135）开始到结束的剩余时间
+                # 避免受历史步数干扰导致 ETA 只有几分钟
+                steps_this_session = (epoch - START_EPOCH) * steps_per_epoch + i + 1
+                remaining_steps = (EPOCHS - epoch) * steps_per_epoch - i
+                avg_time_per_step = (time.time() - start_time) / steps_this_session
+                eta_seconds = avg_time_per_step * remaining_steps
+                
                 eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
                 current_lr = lr_scheduler.get_lr()
                 print(f"Epoch {epoch} Step {i}/{steps_per_epoch}, Loss: {float(loss):.4f}, CTC: {float(ctc_loss):.4f}, ATT: {float(att_loss):.4f}, LR: {current_lr:.8f}, ETA: {eta_str}, {get_gpu_info()}")

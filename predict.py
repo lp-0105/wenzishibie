@@ -68,9 +68,10 @@ def predict_batch(image_paths):
     
     imgs_tensor = paddle.to_tensor(np.array(imgs))
     with paddle.no_grad():
-        preds = model(imgs_tensor) # [B, 25, num_classes]
+        # 兼容最新模型：返回 ctc_out 和 att_out，只需取 ctc_out
+        ctc_out, _ = model(imgs_tensor) 
     
-    preds_idx = paddle.argmax(preds, axis=-1).numpy()
+    preds_idx = paddle.argmax(ctc_out, axis=-1).numpy()
     return [decode_ctc(p) for p in preds_idx]
 
 # --- 5. 循环预测测试集 ---
