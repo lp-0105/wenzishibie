@@ -14,10 +14,10 @@ from model import TransformerOCR
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- 1. 参数配置 (RTX 4090 狂暴模式: TPS + 极速收敛) ---
+# --- 1. 参数配置 (RTX 5090 狂暴模式: TPS + 极速收敛) ---
 IMG_H, IMG_W = 32, 320 
-# 4090 拥有 24GB 显存，建议 BS 设为 512，大幅缩短训练耗时
-BATCH_SIZE = 512  
+# 5090 拥有 32GB 显存，建议 BS 设为 1024，大幅缩短训练耗时
+BATCH_SIZE = 1024  
 EPOCHS = 400      
 DEVICE = 'gpu' if paddle.is_compiled_with_cuda() else 'cpu'
 
@@ -127,8 +127,8 @@ def train():
     train_ds = CustomOCRDataset(TRAIN_TXT, TRAIN_DATA_ROOT, mode='train')
     val_ds = CustomOCRDataset(VAL_TXT, TRAIN_DATA_ROOT, mode='none')
     
-    # 4090 并行吞吐极强，数据加载如果不满，GPU 会“挨饿”
-    num_workers = 8 if DEVICE == 'gpu' else 0 
+    # 5090 并行吞吐极强，数据加载如果不满，GPU 会“挨饿”
+    num_workers = 16 if DEVICE == 'gpu' else 0 
     
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=num_workers)
     val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
@@ -148,7 +148,7 @@ def train():
     att_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
     ctc_loss_fn = nn.CTCLoss(blank=0) 
 
-    base_lr = 0.001 # 4090 并行大 BS 可以使用更大的 LR (0.001) 起步
+    base_lr = 0.001 # 5090 并行大 BS 可以使用更大的 LR (0.001) 起步
     steps_per_epoch = len(train_loader)
     lr_scheduler = paddle.optimizer.lr.CosineAnnealingDecay(learning_rate=base_lr, T_max=EPOCHS * steps_per_epoch)
     lr_scheduler = paddle.optimizer.lr.LinearWarmup(learning_rate=lr_scheduler, warmup_steps=20 * steps_per_epoch, start_lr=0, end_lr=base_lr)
