@@ -56,22 +56,23 @@ class TPS_SpatialTransformer(nn.Layer):
         return paddle.stack([grid_x, grid_y], axis=2).reshape([-1, 2]) # [N, 2]
 
     def _calculate_K_inv(self, F, ctrl_pts):
-        # TPS 核矩阵计算
-        def R2_log_R(r2):
-            return r2 * paddle.log(r2 + 1e-6)
+        # TPS 核矩阵计算: 使用 numpy 在 CPU 上完成，避免 GPU 上的 dtype/维度 冲突
+        ctrl_pts = np.array(ctrl_pts, dtype='float32')
+        def R2_log_R_np(r2):
+            return r2 * np.log(r2 + 1e-6)
         
-        K = paddle.zeros([F, F])
+        K = np.zeros([F, F], dtype='float32')
         for i in range(F):
             for j in range(F):
-                r2 = paddle.sum((paddle.to_tensor(ctrl_pts[i]) - paddle.to_tensor(ctrl_pts[j]))**2)
-                K[i, j] = R2_log_R(r2)
+                r2 = np.sum((ctrl_pts[i] - ctrl_pts[j])**2)
+                K[i, j] = R2_log_R_np(r2)
         
-        P = paddle.concat([paddle.ones([F, 1]), paddle.to_tensor(ctrl_pts, dtype='float32')], axis=1)
-        L = paddle.concat([
-            paddle.concat([K, P], axis=1),
-            paddle.concat([P.transpose([1, 0]), paddle.zeros([3, 3])], axis=1)
+        P = np.concatenate([np.ones([F, 1], dtype='float32'), ctrl_pts], axis=1)
+        L = np.concatenate([
+            np.concatenate([K, P], axis=1),
+            np.concatenate([P.transpose(), np.zeros([3, 3], dtype='float32')], axis=1)
         ], axis=0)
-        return paddle.inverse(L)
+        return paddle.inverse(paddle.to_tensor(L, dtype='float32'))
 
     def forward(self, x):
         batch_size = x.shape[0]

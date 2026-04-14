@@ -14,11 +14,13 @@ from model import TransformerOCR
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# --- 1. 参数配置 (RTX 5090 狂暴模式: TPS + 极速收敛) ---
+# --- 1. 参数配置 (无人房间·稳健冲刺版: 200轮速成架构) ---
 IMG_H, IMG_W = 32, 320 
-# 5090 拥有 32GB 显存，建议 BS 设为 1024，大幅缩短训练耗时
-BATCH_SIZE = 1024  
-EPOCHS = 400      
+# 调整物理 Batch Size 到 100，确保 8GB 显存有充足的“呼吸空间”，不卡死
+BATCH_SIZE = 100  
+# 梯度累加步数：累计 2 次更新一次参数 (有效 Batch Size = 200)
+ACCUM_STEPS = 2
+EPOCHS = 200      
 DEVICE = 'gpu' if paddle.is_compiled_with_cuda() else 'cpu'
 
 def get_gpu_info():
@@ -127,18 +129,18 @@ def train():
     train_ds = CustomOCRDataset(TRAIN_TXT, TRAIN_DATA_ROOT, mode='train')
     val_ds = CustomOCRDataset(VAL_TXT, TRAIN_DATA_ROOT, mode='none')
     
-    # 5090 并行吞吐极强，数据加载如果不满，GPU 会“挨饿”
-    num_workers = 16 if DEVICE == 'gpu' else 0 
+    # 无人房间模式：把多进程读图拉满到 8，并且开启共享内存加速
+    num_workers = 8 if DEVICE == 'gpu' else 0 
     
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=num_workers)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=num_workers)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn, num_workers=num_workers, use_shared_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn, num_workers=num_workers, use_shared_memory=True)
     
     model = TransformerOCR(num_classes)
     
     # --- 核心改进：重置训练状态 (TPS 架构变更，不能直接 Load 之前的模型) ---
-    RESUME_PATH = 'checkpoints/best_model_tps.pdparams' # 换个新文件名存储
+    RESUME_PATH = 'checkpoints/best_model.pdparams' 
     if os.path.exists(RESUME_PATH):
-        print(f"检测到 TPS 专用断点，正在加载之前训好的模型: {RESUME_PATH}")
+        print(f"检测到断点，正在加载之前训好的模型: {RESUME_PATH}")
         model.set_state_dict(paddle.load(RESUME_PATH))
     else:
         print("新的 TPS 架构，将从 Epoch 0 开始全新磨合！")
@@ -148,33 +150,49 @@ def train():
     att_loss_fn = nn.CrossEntropyLoss(label_smoothing=0.1)
     ctc_loss_fn = nn.CTCLoss(blank=0) 
 
-    base_lr = 0.001 # 5090 并行大 BS 可以使用更大的 LR (0.001) 起步
+    # 本地通宵模式：有效 Batch 200 适配 LR 0.0005 建立最强收敛动力
+    base_lr = 0.0005 
     steps_per_epoch = len(train_loader)
-    lr_scheduler = paddle.optimizer.lr.CosineAnnealingDecay(learning_rate=base_lr, T_max=EPOCHS * steps_per_epoch)
-    lr_scheduler = paddle.optimizer.lr.LinearWarmup(learning_rate=lr_scheduler, warmup_steps=20 * steps_per_epoch, start_lr=0, end_lr=base_lr)
+    # 核心修复：由于梯度累加，调度器真正执行 step 的次数是原来除以 ACCUM_STEPS
+    actual_steps_per_epoch = steps_per_epoch // ACCUM_STEPS
+
+    lr_scheduler = paddle.optimizer.lr.CosineAnnealingDecay(learning_rate=base_lr, T_max=EPOCHS * actual_steps_per_epoch)
+    # 按照之前的计划，Warmup 设为 10 轮更合理
+    lr_scheduler = paddle.optimizer.lr.LinearWarmup(learning_rate=lr_scheduler, warmup_steps=10 * actual_steps_per_epoch, start_lr=0, end_lr=base_lr)
     
     opt = paddle.optimizer.AdamW(learning_rate=lr_scheduler, parameters=model.parameters(), weight_decay=0.01, grad_clip=nn.ClipGradByNorm(5.0))
+    
+    # --- 重置 Epoch 计数器 ---
+    START_EPOCH = 100 
+
+    # --- 快进学习率调度器 ---
+    if START_EPOCH > 0:
+        fast_forward_steps = START_EPOCH * actual_steps_per_epoch
+        print(f"快进学习率调度器 {fast_forward_steps} 步 (至 Epoch {START_EPOCH})...")
+        for _ in range(fast_forward_steps):
+            lr_scheduler.step()
+        print(f"当前学习率 (Epoch {START_EPOCH} 起点): {lr_scheduler.get_lr():.8f}")
     
     print(f"开始 TPS+双头 全速训练! 设备: {DEVICE}, BS: {BATCH_SIZE}")
     start_time = time.time()
     best_val_acc = 0.0
     
-    # --- 重置 Epoch 计数器 ---
-    START_EPOCH = 0 
-    
     # --- 强进阶：分段训练 (Multi-stage Training) ---
-    # 前 320 轮开启大强度数据增强进行“苦练”
-    # 后 80 轮关闭或极端弱化数据增强进行“冲刺” (以求损失函数在干净数据上坍塌到极低)
+    # 前 160 轮开启大强度数据增强进行“苦练”
+    # 后 40 轮关闭或极端弱化数据增强进行“冲刺” (以求损失函数在干净数据上落到底部)
     
     for epoch in range(START_EPOCH, EPOCHS):
         model.train()
-        # 320 轮之后进入“冲刺期”，关闭复杂的旋转和透视，专注拟合
-        if epoch >= 320:
+        # 200轮架构下：160轮后进入“冲刺期”，关闭复杂的旋转和透视，专注拟合
+        if epoch >= 160:
             train_ds.mode = 'none' 
         else:
             train_ds.mode = 'train'
 
         for i, (imgs, labels, l_lens) in enumerate(train_loader()):
+            # 无人房间模式：移除所有休眠，全力冲刺
+            # time.sleep(0.15) 
+            
             imgs = paddle.to_tensor(imgs)
             labels = paddle.to_tensor(labels)
             l_lens = paddle.to_tensor(l_lens)
@@ -190,24 +208,23 @@ def train():
             att_loss = att_loss_fn(att_out.reshape([-1, num_classes]), labels.reshape([-1]))
             
             # --- 联合训练：视觉为主 (1.0)，语义为辅 (0.1) ---
-            loss = ctc_loss + 0.1 * att_loss
+            loss = (ctc_loss + 0.1 * att_loss) / ACCUM_STEPS
             
             # 使用标准的 FP32 反向传播，更稳定
             loss.backward()
-            opt.step()
-            
-            # 步进学习率并清除梯度
-            lr_scheduler.step()
-            opt.clear_grad()
 
-            # 宿舍无人昼间模式：移除所有休眠，全力冲刺
-            # time.sleep(0.04)
-            
+            # 梯度累加逻辑
+            if (i + 1) % ACCUM_STEPS == 0:
+                opt.step()
+                # 步进学习率并清除梯度
+                lr_scheduler.step()
+                opt.clear_grad()
+
             if i % 100 == 0:
-                # 修正加速模式下的 ETA 计算：只计算从本次启动（Epoch 135）开始到结束的剩余时间
-                # 避免受历史步数干扰导致 ETA 只有几分钟
+                # 修正 ETA 计算：统一使用真实物理加载次数 (steps_per_epoch)，消除跨轮次的时间跳变错觉
                 steps_this_session = (epoch - START_EPOCH) * steps_per_epoch + i + 1
-                remaining_steps = (EPOCHS - epoch) * steps_per_epoch - i
+                total_steps = (EPOCHS - START_EPOCH) * steps_per_epoch
+                remaining_steps = total_steps - steps_this_session
                 avg_time_per_step = (time.time() - start_time) / steps_this_session
                 eta_seconds = avg_time_per_step * remaining_steps
                 
@@ -216,6 +233,11 @@ def train():
                 print(f"Epoch {epoch} Step {i}/{steps_per_epoch}, Loss: {float(loss):.4f}, CTC: {float(ctc_loss):.4f}, ATT: {float(att_loss):.4f}, LR: {current_lr:.8f}, ETA: {eta_str}, {get_gpu_info()}")
 
         # 验证阶段 (仅使用 CTC 分支进行快速准确识别)
+        # 为节约时间，前 180 轮每 5 轮才验证并保存一次；最后 20 轮冲刺期才每轮都验证
+        if epoch % 5 != 0 and epoch < 180:
+            print(f"--- Epoch {epoch} 跳过验证，直接进入下一轮训练 ---")
+            continue
+
         model.eval()
         total_correct = 0
         total_samples = 0
@@ -233,6 +255,11 @@ def train():
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             paddle.save(model.state_dict(), 'checkpoints/best_model.pdparams')
+            
+        # 每 20 轮强制做一次备份，避免占用过多硬盘空间
+        if epoch % 20 == 0:
+            paddle.save(model.state_dict(), f'checkpoints/transformer_{epoch}.pdparams')
+
 
 if __name__ == '__main__':
     train()

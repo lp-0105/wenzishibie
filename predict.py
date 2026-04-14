@@ -6,7 +6,7 @@ from PIL import Image
 from model import TransformerOCR
 
 # --- 1. 配置 ---
-IMG_H, IMG_W = 48, 160
+IMG_H, IMG_W = 32, 320
 TEST_DIR = 'data/test_images'
 SAVE_FILE = 'result.txt'  # 修改为 .txt 后缀
 # 自动寻找最新的权重文件
